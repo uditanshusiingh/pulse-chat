@@ -1,4 +1,0 @@
-const b64=a=>btoa(String.fromCharCode(...new Uint8Array(a))); const unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
-async function key(chatId){let saved=localStorage.getItem(`pulse-key:${chatId}`);if(!saved){saved=b64(crypto.getRandomValues(new Uint8Array(32)));localStorage.setItem(`pulse-key:${chatId}`,saved)}return crypto.subtle.importKey('raw',unb64(saved),'AES-GCM',false,['encrypt','decrypt']);}
-export async function encrypt(chatId,text){const iv=crypto.getRandomValues(new Uint8Array(12));const data=await crypto.subtle.encrypt({name:'AES-GCM',iv},await key(chatId),new TextEncoder().encode(text));return {ciphertext:b64(data),iv:b64(iv)};}
-export async function decrypt(chatId,{ciphertext,iv}){try{return new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(iv)},await key(chatId),unb64(ciphertext)))}catch{return '🔒 Encrypted message — key unavailable on this device';}}
