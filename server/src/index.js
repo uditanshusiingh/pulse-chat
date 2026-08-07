@@ -19,7 +19,11 @@ io.use(socketAuth); io.on('connection',async socket=>{const uid=socket.userId;so
  socket.on('message:read',async({chatId,messageId})=>{const chat=await permitted(chatId,uid);if(!chat)return;await Message.findByIdAndUpdate(messageId,{$addToSet:{readBy:uid},$set:{status:'read'}});io.to(`chat:${chatId}`).emit('message:read',{chatId,messageId,userId:uid});});
  socket.on('disconnect',async()=>{await User.findByIdAndUpdate(uid,{lastSeen:new Date()});io.emit('presence',{userId:uid,online:false});});});
 const port = Number(process.env.PORT || 5000);
-server.listen(port, '0.0.0.0', () => console.log(`API listening on port ${port}`));
+
+server.listen(port, '0.0.0.0', () => {
+  console.log(`API listening on port ${port}`);
+});
+
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(error => console.error('MongoDB connection failed:', error.message));
