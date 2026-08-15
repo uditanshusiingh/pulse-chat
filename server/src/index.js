@@ -1,29 +1,740 @@
-import 'dotenv/config'; import express from 'express'; import http from 'http'; import cors from 'cors'; import helmet from 'helmet'; import morgan from 'morgan'; import rateLimit from 'express-rate-limit'; import mongoose from 'mongoose'; import multer from 'multer'; import {Server} from 'socket.io'; import bcrypt from 'bcryptjs'; import {User,Chat,Message} from './models.js'; import {issueToken,requireAuth,socketAuth} from './auth.js';
-const app=express(), server=http.createServer(app), origins=(process.env.CLIENT_URL||'http://localhost:5173').split(',');
-const io=new Server(server,{cors:{origin:origins,credentials:true}}); const upload=multer({dest:process.env.UPLOAD_DIR||'uploads/',limits:{fileSize:25*1024*1024}});
-app.use(helmet({crossOriginResourcePolicy:false})); app.use(cors({origin:origins})); app.use(express.json({limit:'1mb'})); app.use(morgan('tiny')); app.use('/uploads',express.static(process.env.UPLOAD_DIR||'uploads'));
-app.get('/health',(_,res)=>res.json({ok:true}));
-app.post('/api/auth/register',rateLimit({windowMs:60000,max:10}),async(req,res)=>{const {name,email,password}=req.body; if(!name||!email||!password||password.length<8)return res.status(400).json({error:'Name, email and an 8-character password are required'}); try { const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12)}); res.status(201).json({token:issueToken(u.id),user:publicUser(u)}); } catch {res.status(409).json({error:'Email already registered'});} });
-app.post('/api/auth/login',rateLimit({windowMs:60000,max:10}),async(req,res)=>{const u=await User.findOne({email:req.body.email?.toLowerCase()}); if(!u||!await bcrypt.compare(req.body.password||'',u.passwordHash))return res.status(401).json({error:'Invalid credentials'}); res.json({token:issueToken(u.id),user:publicUser(u)});});
-app.get('/api/me',requireAuth,async(req,res)=>res.json(publicUser(await User.findById(req.userId)))); app.patch('/api/me',requireAuth,async(req,res)=>res.json(publicUser(await User.findByIdAndUpdate(req.userId,{$set:{name:req.body.name,bio:req.body.bio,avatar:req.body.avatar}},{new:true,runValidators:true}))));
-app.get('/api/users',requireAuth,async(req,res)=>{const q=(req.query.q||'').replace(/[.*+?^${}()|[\]\\]/g,'\\$&');res.json((await User.find({_id:{$ne:req.userId},$or:[{name:{$regex:q,$options:'i'}},{email:{$regex:q,$options:'i'}}]}).limit(20)).map(publicUser));});
-app.get('/api/chats',requireAuth,async(req,res)=>res.json(await Chat.find({members:req.userId}).populate('members','name email avatar lastSeen').populate({path:'lastMessage',populate:{path:'sender',select:'name'}}).sort({updatedAt:-1})));
-app.post('/api/chats',requireAuth,async(req,res)=>{const memberIds=[...new Set([req.userId,...(req.body.memberIds||[])])]; if(memberIds.length<2)return res.status(400).json({error:'Choose at least one other member'}); const type=req.body.type==='group'?'group':'direct'; if(type==='direct'){const found=await Chat.findOne({type:'direct',members:{$all:memberIds},$expr:{$eq:[{$size:'$members'},2]}});if(found)return res.json(found);} const chat=await Chat.create({type,members:memberIds,title:req.body.title||'',adminIds:[req.userId]}); const populated=await chat.populate('members','name email avatar lastSeen'); memberIds.forEach(id=>io.to(`user:${id}`).emit('chat:new',populated));res.status(201).json(populated);});
-app.get('/api/chats/:id/messages',requireAuth,async(req,res)=>{const chat=await permitted(req.params.id,req.userId);if(!chat)return res.sendStatus(404); const before=req.query.before?{_id:{$lt:req.query.before}}:{};res.json(await Message.find({chat:chat.id,...before}).populate('sender','name avatar').sort({_id:-1}).limit(50));});
-app.post('/api/upload',requireAuth,upload.single('file'),(req,res)=>{if(!req.file)return res.status(400).json({error:'File required'});res.status(201).json({url:`/uploads/${req.file.filename}`,name:req.file.originalname,mime:req.file.mimetype,size:req.file.size});});
-app.post('/api/push/subscribe',requireAuth,async(req,res)=>{await User.findByIdAndUpdate(req.userId,{$addToSet:{pushSubscriptions:req.body.subscription}});res.sendStatus(204);});
-async function permitted(id,userId){return Chat.findOne({_id:id,members:userId});} function publicUser(u){return {id:u.id,name:u.name,email:u.email,avatar:u.avatar,bio:u.bio,lastSeen:u.lastSeen};}
-io.use(socketAuth); io.on('connection',async socket=>{const uid=socket.userId;socket.join(`user:${uid}`);const chats=await Chat.find({members:uid}).select('_id');chats.forEach(c=>socket.join(`chat:${c.id}`));io.emit('presence',{userId:uid,online:true});
- socket.on('typing',async({chatId,isTyping})=>{if(await permitted(chatId,uid))socket.to(`chat:${chatId}`).emit('typing',{chatId,userId:uid,isTyping});});
- socket.on('message:send',async(data,ack)=>{try{const chat=await permitted(data.chatId,uid);if(!chat)throw Error('Chat unavailable');const msg=await Message.create({chat:chat.id,sender:uid,ciphertext:data.ciphertext,iv:data.iv,kind:data.kind||'text',attachment:data.attachment});chat.lastMessage=msg.id;await chat.save();const full=await msg.populate('sender','name avatar');io.to(`chat:${chat.id}`).emit('message:new',full);ack?.({ok:true,message:full});}catch(e){ack?.({ok:false,error:e.message});}});
- socket.on('message:read',async({chatId,messageId})=>{const chat=await permitted(chatId,uid);if(!chat)return;await Message.findByIdAndUpdate(messageId,{$addToSet:{readBy:uid},$set:{status:'read'}});io.to(`chat:${chatId}`).emit('message:read',{chatId,messageId,userId:uid});});
- socket.on('disconnect',async()=>{await User.findByIdAndUpdate(uid,{lastSeen:new Date()});io.emit('presence',{userId:uid,online:false});});});
+import dotenv from 'dotenv';
+
+dotenv.config({
+    path: '../../.env'
+});
+
+import express from 'express';
+import http from 'http';
+import cors from 'cors';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
+import mongoose from 'mongoose';
+import multer from 'multer';
+import { Server } from 'socket.io';
+import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+
+import { User, Chat, Message } from './models.js';
+import { issueToken, requireAuth, socketAuth } from './auth.js';
+
+const app = express();
+const server = http.createServer(app);
+
+const origins = (
+    process.env.CLIENT_URL || 'http://localhost:5173'
+).split(',');
+
+const io = new Server(server, {
+    cors: {
+        origin: origins,
+        credentials: true
+    }
+});
+
+const upload = multer({
+    dest: process.env.UPLOAD_DIR || 'uploads/',
+    limits: {
+        fileSize: 25 * 1024 * 1024
+    }
+});
+
+app.use(
+    helmet({
+        crossOriginResourcePolicy: false
+    })
+);
+
+app.use(
+    cors({
+        origin: origins
+    })
+);
+
+app.use(
+    express.json({
+        limit: '1mb'
+    })
+);
+
+app.use(morgan('tiny'));
+
+app.use(
+    '/uploads',
+    express.static(process.env.UPLOAD_DIR || 'uploads')
+);
+
+app.get('/health', (_, res) => {
+    res.json({ ok: true });
+});
+
+
+// ============================================================
+// AUTHENTICATION
+// ============================================================
+
+app.post(
+    '/api/auth/register',
+    rateLimit({
+        windowMs: 60000,
+        max: 10
+    }),
+    async (req, res) => {
+        const { name, email, password } = req.body;
+
+        if (!name || !email || !password || password.length < 8) {
+            return res.status(400).json({
+                error: 'Name, email and an 8-character password are required'
+            });
+        }
+
+        try {
+            const user = await User.create({
+                name,
+                email,
+                passwordHash: await bcrypt.hash(password, 12)
+            });
+
+            res.status(201).json({
+                token: issueToken(user.id),
+                user: publicUser(user)
+            });
+        } catch {
+            res.status(409).json({
+                error: 'Email already registered'
+            });
+        }
+    }
+);
+
+app.post(
+    '/api/auth/login',
+    rateLimit({
+        windowMs: 60000,
+        max: 10
+    }),
+    async (req, res) => {
+        const user = await User.findOne({
+            email: req.body.email?.toLowerCase()
+        });
+
+        const validPassword =
+            user &&
+            await bcrypt.compare(
+                req.body.password || '',
+                user.passwordHash
+            );
+
+        if (!validPassword) {
+            return res.status(401).json({
+                error: 'Invalid credentials'
+            });
+        }
+
+        res.json({
+            token: issueToken(user.id),
+            user: publicUser(user)
+        });
+    }
+);
+
+
+// ============================================================
+// PASSWORD RESET
+// ============================================================
+
+app.post(
+    '/api/auth/forgot-password',
+    rateLimit({
+        windowMs: 60000,
+        max: 5
+    }),
+    async (req, res) => {
+        const email = req.body.email?.toLowerCase()?.trim();
+
+        const user = await User.findOne({ email });
+
+        // Keep response identical whether the email exists or not.
+        if (!user) {
+            return res.json({
+                message: 'If an account exists for that email, a reset link has been sent.'
+            });
+        }
+
+        const token = crypto.randomBytes(32).toString('hex');
+
+        user.resetTokenHash = crypto
+            .createHash('sha256')
+            .update(token)
+            .digest('hex');
+
+        user.resetTokenExpiresAt = new Date(
+            Date.now() + 15 * 60 * 1000
+        );
+
+        await user.save();
+
+        const baseUrl = (
+            process.env.RESET_URL ||
+            process.env.CLIENT_URL ||
+            'http://localhost:5173'
+        ).replace(/\/$/, '');
+
+        const resetLink = `${baseUrl}/?reset=${token}`;
+
+        if (process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
+            try {
+                const response = await fetch(
+                    'https://api.resend.com/emails',
+                    {
+                        method: 'POST',
+                        headers: {
+                            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            from: process.env.EMAIL_FROM,
+                            to: [user.email],
+                            subject: 'Reset your Pulse password',
+                            html: `
+                                <h2>Reset your password</h2>
+                                <p>This link expires in 15 minutes.</p>
+                                <p>
+                                    <a href="${resetLink}">
+                                        Reset password
+                                    </a>
+                                </p>
+                            `
+                        })
+                    }
+                );
+
+                if (!response.ok) {
+                    console.error(
+                        'Password reset email failed:',
+                        await response.text()
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    'Password reset email failed:',
+                    error.message
+                );
+            }
+        } else {
+            console.log(
+                `Password reset link for ${user.email}: ${resetLink}`
+            );
+        }
+
+        res.json({
+            message: 'If an account exists for that email, a reset link has been sent.'
+        });
+    }
+);
+
+app.post(
+    '/api/auth/reset-password',
+    rateLimit({
+        windowMs: 60000,
+        max: 5
+    }),
+    async (req, res) => {
+        const { token, password } = req.body;
+
+        if (!token || !password || password.length < 8) {
+            return res.status(400).json({
+                error: 'Enter a new password with at least 8 characters'
+            });
+        }
+
+        const tokenHash = crypto
+            .createHash('sha256')
+            .update(token)
+            .digest('hex');
+
+        const user = await User.findOne({
+            resetTokenHash: tokenHash,
+            resetTokenExpiresAt: {
+                $gt: new Date()
+            }
+        });
+
+        if (!user) {
+            return res.status(400).json({
+                error: 'This reset link is invalid or has expired'
+            });
+        }
+
+        user.passwordHash = await bcrypt.hash(password, 12);
+        user.resetTokenHash = undefined;
+        user.resetTokenExpiresAt = undefined;
+
+        await user.save();
+
+        res.json({
+            message: 'Password updated. You can now sign in.'
+        });
+    }
+);
+
+
+// ============================================================
+// PROFILE
+// ============================================================
+
+app.get(
+    '/api/me',
+    requireAuth,
+    async (req, res) => {
+        const user = await User.findById(req.userId);
+
+        res.json(publicUser(user));
+    }
+);
+
+app.patch(
+    '/api/me',
+    requireAuth,
+    async (req, res) => {
+        const user = await User.findByIdAndUpdate(
+            req.userId,
+            {
+                $set: {
+                    name: req.body.name,
+                    bio: req.body.bio,
+                    avatar: req.body.avatar
+                }
+            },
+            {
+                new: true,
+                runValidators: true
+            }
+        );
+
+        res.json(publicUser(user));
+    }
+);
+
+app.get(
+    '/api/users',
+    requireAuth,
+    async (req, res) => {
+        const q = (
+            req.query.q || ''
+        ).replace(
+            /[.*+?^${}()|[\]\\]/g,
+            '\\$&'
+        );
+
+        const users = await User.find({
+            _id: {
+                $ne: req.userId
+            },
+            $or: [
+                {
+                    name: {
+                        $regex: q,
+                        $options: 'i'
+                    }
+                },
+                {
+                    email: {
+                        $regex: q,
+                        $options: 'i'
+                    }
+                }
+            ]
+        }).limit(20);
+
+        res.json(users.map(publicUser));
+    }
+);
+
+
+// ============================================================
+// CHATS
+// ============================================================
+
+app.get(
+    '/api/chats',
+    requireAuth,
+    async (req, res) => {
+        const chats = await Chat.find({
+            members: req.userId
+        })
+            .populate(
+                'members',
+                'name email avatar lastSeen'
+            )
+            .populate({
+                path: 'lastMessage',
+                populate: {
+                    path: 'sender',
+                    select: 'name'
+                }
+            })
+            .sort({
+                updatedAt: -1
+            });
+
+        res.json(chats);
+    }
+);
+
+app.post(
+    '/api/chats',
+    requireAuth,
+    async (req, res) => {
+        const memberIds = [
+            ...new Set([
+                req.userId,
+                ...(req.body.memberIds || [])
+            ])
+        ];
+
+        if (memberIds.length < 2) {
+            return res.status(400).json({
+                error: 'Choose at least one other member'
+            });
+        }
+
+        const type =
+            req.body.type === 'group'
+                ? 'group'
+                : 'direct';
+
+        if (type === 'direct') {
+            const existingChat = await Chat.findOne({
+                type: 'direct',
+                members: {
+                    $all: memberIds
+                },
+                $expr: {
+                    $eq: [
+                        {
+                            $size: '$members'
+                        },
+                        2
+                    ]
+                }
+            })
+                .populate(
+                    'members',
+                    'name email avatar lastSeen'
+                )
+                .populate({
+                    path: 'lastMessage',
+                    populate: {
+                        path: 'sender',
+                        select: 'name'
+                    }
+                });
+
+            if (existingChat) {
+                return res.json(existingChat);
+            }
+        }
+
+        const chat = await Chat.create({
+            type,
+            members: memberIds,
+            title: req.body.title || '',
+            adminIds: [req.userId]
+        });
+
+        const populatedChat = await chat.populate(
+            'members',
+            'name email avatar lastSeen'
+        );
+
+        memberIds.forEach(id => {
+            io.to(`user:${id}`).emit(
+                'chat:new',
+                populatedChat
+            );
+        });
+
+        res.status(201).json(populatedChat);
+    }
+);
+
+
+// ============================================================
+// MESSAGES
+// ============================================================
+
+app.get(
+    '/api/chats/:id/messages',
+    requireAuth,
+    async (req, res) => {
+        const chat = await permitted(
+            req.params.id,
+            req.userId
+        );
+
+        if (!chat) {
+            return res.sendStatus(404);
+        }
+
+        const before = req.query.before
+            ? {
+                _id: {
+                    $lt: req.query.before
+                }
+            }
+            : {};
+
+        const messages = await Message.find({
+            chat: chat.id,
+            ...before
+        })
+            .populate(
+                'sender',
+                'name avatar'
+            )
+            .sort({
+                _id: -1
+            })
+            .limit(50);
+
+        res.json(messages);
+    }
+);
+
+
+// ============================================================
+// UPLOADS AND PUSH
+// ============================================================
+
+app.post(
+    '/api/upload',
+    requireAuth,
+    upload.single('file'),
+    (req, res) => {
+        if (!req.file) {
+            return res.status(400).json({
+                error: 'File required'
+            });
+        }
+
+        res.status(201).json({
+            url: `/uploads/${req.file.filename}`,
+            name: req.file.originalname,
+            mime: req.file.mimetype,
+            size: req.file.size
+        });
+    }
+);
+
+app.post(
+    '/api/push/subscribe',
+    requireAuth,
+    async (req, res) => {
+        await User.findByIdAndUpdate(
+            req.userId,
+            {
+                $addToSet: {
+                    pushSubscriptions:
+                        req.body.subscription
+                }
+            }
+        );
+
+        res.sendStatus(204);
+    }
+);
+
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+async function permitted(id, userId) {
+    return Chat.findOne({
+        _id: id,
+        members: userId
+    });
+}
+
+function publicUser(user) {
+    return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar,
+        bio: user.bio,
+        lastSeen: user.lastSeen
+    };
+}
+
+
+// ============================================================
+// SOCKET.IO
+// ============================================================
+
+io.use(socketAuth);
+
+io.on(
+    'connection',
+    async socket => {
+        const userId = socket.userId;
+
+        socket.join(`user:${userId}`);
+
+        const chats = await Chat.find({
+            members: userId
+        }).select('_id');
+
+        chats.forEach(chat => {
+            socket.join(`chat:${chat.id}`);
+        });
+
+        io.emit('presence', {
+            userId,
+            online: true
+        });
+
+        socket.on(
+            'typing',
+            async ({ chatId, isTyping }) => {
+                if (await permitted(chatId, userId)) {
+                    socket
+                        .to(`chat:${chatId}`)
+                        .emit(
+                            'typing',
+                            {
+                                chatId,
+                                userId,
+                                isTyping
+                            }
+                        );
+                }
+            }
+        );
+
+        socket.on(
+            'message:send',
+            async (data, ack) => {
+                try {
+                    const chat = await permitted(
+                        data.chatId,
+                        userId
+                    );
+
+                    if (!chat) {
+                        throw Error('Chat unavailable');
+                    }
+
+                    const message = await Message.create({
+                        chat: chat.id,
+                        sender: userId,
+                        ciphertext: data.ciphertext,
+                        iv: data.iv,
+                        kind: data.kind || 'text',
+                        attachment: data.attachment
+                    });
+
+                    chat.lastMessage = message.id;
+                    await chat.save();
+
+                    const fullMessage = await message.populate(
+                        'sender',
+                        'name avatar'
+                    );
+
+                    io.to(`chat:${chat.id}`).emit(
+                        'message:new',
+                        fullMessage
+                    );
+
+                    ack?.({
+                        ok: true,
+                        message: fullMessage
+                    });
+                } catch (error) {
+                    ack?.({
+                        ok: false,
+                        error: error.message
+                    });
+                }
+            }
+        );
+
+        socket.on(
+            'message:read',
+            async ({ chatId, messageId }) => {
+                const chat = await permitted(
+                    chatId,
+                    userId
+                );
+
+                if (!chat) {
+                    return;
+                }
+
+                await Message.findByIdAndUpdate(
+                    messageId,
+                    {
+                        $addToSet: {
+                            readBy: userId
+                        },
+                        $set: {
+                            status: 'read'
+                        }
+                    }
+                );
+
+                io.to(`chat:${chatId}`).emit(
+                    'message:read',
+                    {
+                        chatId,
+                        messageId,
+                        userId
+                    }
+                );
+            }
+        );
+
+        socket.on(
+            'disconnect',
+            async () => {
+                await User.findByIdAndUpdate(
+                    userId,
+                    {
+                        lastSeen: new Date()
+                    }
+                );
+
+                io.emit('presence', {
+                    userId,
+                    online: false
+                });
+            }
+        );
+    }
+);
+
+
+// ============================================================
+// START SERVER
+// ============================================================
+
 const port = Number(process.env.PORT || 5000);
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`API listening on port ${port}`);
+    console.log(`API listening on port ${port}`);
 });
 
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(error => console.error('MongoDB connection failed:', error.message));
+mongoose
+    .connect(process.env.MONGODB_URI)
+    .then(() => {
+        console.log('MongoDB connected');
+    })
+    .catch(error => {
+        console.error(
+            'MongoDB connection failed:',
+            error.message
+        );
+    });
