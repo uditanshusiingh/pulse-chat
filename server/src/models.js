@@ -36,10 +36,11 @@ const userSchema = new Schema(
             Schema.Types.Mixed
         ],
 
-        // Password reset fields
         resetTokenHash: String,
 
-        resetTokenExpiresAt: Date
+        resetTokenExpiresAt: Date,
+
+        encryptionPublicKey: Schema.Types.Mixed
     },
     {
         timestamps: true
@@ -75,7 +76,22 @@ const chatSchema = new Schema(
         lastMessage: {
             type: Schema.Types.ObjectId,
             ref: 'Message'
-        }
+        },
+
+        keyEnvelopes: [
+            {
+                user: {
+                    type: Schema.Types.ObjectId,
+                    ref: 'User'
+                },
+
+                encryptedKey: String,
+
+                iv: String,
+
+                senderPublicKey: Schema.Types.Mixed
+            }
+        ]
     },
     {
         timestamps: true
@@ -149,10 +165,5 @@ const messageSchema = new Schema(
 );
 
 export const User = model('User', userSchema);
-
 export const Chat = model('Chat', chatSchema);
-
-export const Message = model(
-    'Message',
-    messageSchema
-);
+export const Message = model('Message', messageSchema);
