@@ -596,7 +596,8 @@ function App() {
                     <button
                         className="icon"
                         onClick={() => {
-                            localStorage.clear();
+                            localStorage.removeItem('pulse-token');
+                            localStorage.removeItem('pulse-user');
                             setMe(null);
                         }}
                     >
