@@ -21,7 +21,10 @@ const server = http.createServer(app);
 
 const origins = (
     process.env.CLIENT_URL || 'http://localhost:5173'
-).split(',');
+)
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean);
 
 const io = new Server(server, {
     cors: {
@@ -37,17 +40,24 @@ const upload = multer({
     }
 });
 
-app.use(helmet({
-    crossOriginResourcePolicy: false
-}));
+app.use(
+    helmet({
+        crossOriginResourcePolicy: false
+    })
+);
 
-app.use(cors({
-    origin: origins
-}));
+app.use(
+    cors({
+        origin: origins,
+        credentials: true
+    })
+);
 
-app.use(express.json({
-    limit: '1mb'
-}));
+app.use(
+    express.json({
+        limit: '1mb'
+    })
+);
 
 app.use(morgan('tiny'));
 
@@ -57,7 +67,13 @@ app.use(
 );
 
 app.get('/health', (_, res) => {
-    res.json({ ok: true });
+    res.json({
+        ok: true,
+        database:
+            mongoose.connection.readyState === 1
+                ? 'connected'
+                : 'connecting'
+    });
 });
 
 function publicUser(user) {
@@ -78,27 +94,54 @@ async function permitted(id, userId) {
     });
 }
 
+async function populatedChat(chatId) {
+    return Chat.findById(chatId)
+        .populate(
+            'members',
+            'name email avatar bio lastSeen'
+        )
+        .populate({
+            path: 'lastMessage',
+            populate: {
+                path: 'sender',
+                select: 'name avatar'
+            }
+        });
+}
 
-// ============================================================
-// AUTHENTICATION
-// ============================================================
+/* ============================================================
+   AUTHENTICATION
+============================================================ */
 
 app.post(
     '/api/auth/register',
-    rateLimit({ windowMs: 60000, max: 10 }),
+    rateLimit({
+        windowMs: 60000,
+        max: 10
+    }),
     async (req, res) => {
-        const { name, email, password } = req.body;
+        const {
+            name,
+            email,
+            password
+        } = req.body;
 
-        if (!name || !email || !password || password.length < 8) {
+        if (
+            !name ||
+            !email ||
+            !password ||
+            password.length < 8
+        ) {
             return res.status(400).json({
-                error: 'Name, email and an 8-character password are required'
+                error:
+                    'Name, email and an 8-character password are required'
             });
         }
 
         try {
             const user = await User.create({
-                name,
-                email,
+                name: name.trim(),
+                email: email.trim().toLowerCase(),
                 passwordHash: await bcrypt.hash(password, 12)
             });
 
@@ -116,10 +159,13 @@ app.post(
 
 app.post(
     '/api/auth/login',
-    rateLimit({ windowMs: 60000, max: 10 }),
+    rateLimit({
+        windowMs: 60000,
+        max: 10
+    }),
     async (req, res) => {
         const user = await User.findOne({
-            email: req.body.email?.toLowerCase()
+            email: req.body.email?.toLowerCase().trim()
         });
 
         const validPassword =
@@ -142,21 +188,27 @@ app.post(
     }
 );
 
-
-// ============================================================
-// PASSWORD RESET
-// ============================================================
+/* ============================================================
+   PASSWORD RESET
+============================================================ */
 
 app.post(
     '/api/auth/forgot-password',
-    rateLimit({ windowMs: 60000, max: 5 }),
+    rateLimit({
+        windowMs: 60000,
+        max: 5
+    }),
     async (req, res) => {
         const email = req.body.email?.toLowerCase()?.trim();
+
         const user = await User.findOne({ email });
+
+        const responseMessage =
+            'If an account exists for that email, a reset link has been sent.';
 
         if (!user) {
             return res.json({
-                message: 'If an account exists for that email, a reset link has been sent.'
+                message: responseMessage
             });
         }
 
@@ -181,14 +233,18 @@ app.post(
 
         const resetLink = `${baseUrl}/?reset=${token}`;
 
-        if (process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
+        if (
+            process.env.RESEND_API_KEY &&
+            process.env.EMAIL_FROM
+        ) {
             try {
-                const response = await fetch(
+                const emailResponse = await fetch(
                     'https://api.resend.com/emails',
                     {
                         method: 'POST',
                         headers: {
-                            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+                            Authorization:
+                                `Bearer ${process.env.RESEND_API_KEY}`,
                             'Content-Type': 'application/json'
                         },
                         body: JSON.stringify({
@@ -196,18 +252,22 @@ app.post(
                             to: [user.email],
                             subject: 'Reset your Pulse password',
                             html: `
-                                <h2>Reset your password</h2>
-                                <p>This link expires in 15 minutes.</p>
-                                <p><a href="${resetLink}">Reset password</a></p>
+                                <h2>Reset your Pulse password</h2>
+                                <p>This reset link expires in 15 minutes.</p>
+                                <p>
+                                    <a href="${resetLink}">
+                                        Reset password
+                                    </a>
+                                </p>
                             `
                         })
                     }
                 );
 
-                if (!response.ok) {
+                if (!emailResponse.ok) {
                     console.error(
                         'Password reset email failed:',
-                        await response.text()
+                        await emailResponse.text()
                     );
                 }
             } catch (error) {
@@ -223,30 +283,41 @@ app.post(
         }
 
         res.json({
-            message: 'If an account exists for that email, a reset link has been sent.'
+            message: responseMessage
         });
     }
 );
 
 app.post(
     '/api/auth/reset-password',
-    rateLimit({ windowMs: 60000, max: 5 }),
+    rateLimit({
+        windowMs: 60000,
+        max: 5
+    }),
     async (req, res) => {
-        const { token, password } = req.body;
+        const {
+            token,
+            password
+        } = req.body;
 
-        if (!token || !password || password.length < 8) {
+        if (
+            !token ||
+            !password ||
+            password.length < 8
+        ) {
             return res.status(400).json({
-                error: 'Enter a new password with at least 8 characters'
+                error:
+                    'Enter a new password with at least 8 characters'
             });
         }
 
-        const hash = crypto
+        const tokenHash = crypto
             .createHash('sha256')
             .update(token)
             .digest('hex');
 
         const user = await User.findOne({
-            resetTokenHash: hash,
+            resetTokenHash: tokenHash,
             resetTokenExpiresAt: {
                 $gt: new Date()
             }
@@ -270,34 +341,56 @@ app.post(
     }
 );
 
+/* ============================================================
+   PROFILE AND ENCRYPTION KEYS
+============================================================ */
 
-// ============================================================
-// PROFILE AND ENCRYPTION KEYS
-// ============================================================
+app.get(
+    '/api/me',
+    requireAuth,
+    async (req, res) => {
+        const user = await User.findById(req.userId);
 
-app.get('/api/me', requireAuth, async (req, res) => {
-    const user = await User.findById(req.userId);
-    res.json(publicUser(user));
-});
-
-app.patch('/api/me', requireAuth, async (req, res) => {
-    const user = await User.findByIdAndUpdate(
-        req.userId,
-        {
-            $set: {
-                name: req.body.name,
-                bio: req.body.bio,
-                avatar: req.body.avatar
-            }
-        },
-        {
-            new: true,
-            runValidators: true
+        if (!user) {
+            return res.sendStatus(404);
         }
-    );
 
-    res.json(publicUser(user));
-});
+        res.json(publicUser(user));
+    }
+);
+
+app.patch(
+    '/api/me',
+    requireAuth,
+    async (req, res) => {
+        const updates = {};
+
+        if (typeof req.body.name === 'string') {
+            updates.name = req.body.name.trim();
+        }
+
+        if (typeof req.body.bio === 'string') {
+            updates.bio = req.body.bio.trim();
+        }
+
+        if (typeof req.body.avatar === 'string') {
+            updates.avatar = req.body.avatar;
+        }
+
+        const user = await User.findByIdAndUpdate(
+            req.userId,
+            {
+                $set: updates
+            },
+            {
+                new: true,
+                runValidators: true
+            }
+        );
+
+        res.json(publicUser(user));
+    }
+);
 
 app.put(
     '/api/me/encryption-key',
@@ -340,133 +433,211 @@ app.get(
     }
 );
 
-app.get('/api/users', requireAuth, async (req, res) => {
-    const q = (req.query.q || '').replace(
-        /[.*+?^${}()|[\]\\]/g,
-        '\\$&'
-    );
+app.get(
+    '/api/users',
+    requireAuth,
+    async (req, res) => {
+        const query = (req.query.q || '').replace(
+            /[.*+?^${}()|[\]\\]/g,
+            '\\$&'
+        );
 
-    const users = await User.find({
-        _id: {
-            $ne: req.userId
-        },
-        $or: [
-            {
-                name: {
-                    $regex: q,
-                    $options: 'i'
-                }
+        const users = await User.find({
+            _id: {
+                $ne: req.userId
             },
-            {
-                email: {
-                    $regex: q,
-                    $options: 'i'
+            $or: [
+                {
+                    name: {
+                        $regex: query,
+                        $options: 'i'
+                    }
+                },
+                {
+                    email: {
+                        $regex: query,
+                        $options: 'i'
+                    }
                 }
-            }
-        ]
-    }).limit(20);
+            ]
+        }).limit(20);
 
-    res.json(users.map(publicUser));
-});
-
-
-// ============================================================
-// CHATS
-// ============================================================
-
-app.get('/api/chats', requireAuth, async (req, res) => {
-    const chats = await Chat.find({
-        members: req.userId
-    })
-        .populate('members', 'name email avatar lastSeen')
-        .populate({
-            path: 'lastMessage',
-            populate: {
-                path: 'sender',
-                select: 'name'
-            }
-        })
-        .sort({
-            updatedAt: -1
-        });
-
-    res.json(chats);
-});
-
-app.post('/api/chats', requireAuth, async (req, res) => {
-    const memberIds = [
-        ...new Set([
-            req.userId,
-            ...(req.body.memberIds || [])
-        ])
-    ];
-
-    if (memberIds.length < 2) {
-        return res.status(400).json({
-            error: 'Choose at least one other member'
-        });
+        res.json(users.map(publicUser));
     }
+);
 
-    const type =
-        req.body.type === 'group'
-            ? 'group'
-            : 'direct';
+/* ============================================================
+   CHATS
+============================================================ */
 
-    if (type === 'direct') {
-        const existingChat = await Chat.findOne({
-            type: 'direct',
-            members: {
-                $all: memberIds
-            },
-            $expr: {
-                $eq: [
-                    {
-                        $size: '$members'
-                    },
-                    2
-                ]
-            }
+app.get(
+    '/api/chats',
+    requireAuth,
+    async (req, res) => {
+        const chats = await Chat.find({
+            members: req.userId
         })
-            .populate('members', 'name email avatar lastSeen')
+            .populate(
+                'members',
+                'name email avatar bio lastSeen'
+            )
             .populate({
                 path: 'lastMessage',
                 populate: {
                     path: 'sender',
-                    select: 'name'
+                    select: 'name avatar'
+                }
+            })
+            .sort({
+                updatedAt: -1
+            });
+
+        res.json(chats);
+    }
+);
+
+app.post(
+    '/api/chats',
+    requireAuth,
+    async (req, res) => {
+        const memberIds = [
+            ...new Set([
+                req.userId,
+                ...(req.body.memberIds || [])
+            ])
+        ];
+
+        if (memberIds.length < 2) {
+            return res.status(400).json({
+                error: 'Choose at least one other member'
+            });
+        }
+
+        const type =
+            req.body.type === 'group'
+                ? 'group'
+                : 'direct';
+
+        if (type === 'direct') {
+            const existingChat = await Chat.findOne({
+                type: 'direct',
+                members: {
+                    $all: memberIds
+                },
+                $expr: {
+                    $eq: [
+                        {
+                            $size: '$members'
+                        },
+                        2
+                    ]
                 }
             });
 
-        if (existingChat) {
-            return res.json(existingChat);
+            if (existingChat) {
+                return res.json(
+                    await populatedChat(existingChat.id)
+                );
+            }
         }
+
+        const chat = await Chat.create({
+            type,
+            members: memberIds,
+            title: req.body.title || '',
+            adminIds: [req.userId],
+            keyEnvelopes: req.body.keyEnvelopes || []
+        });
+
+        const fullChat = await populatedChat(chat.id);
+
+        memberIds.forEach(id => {
+            io.in(`user:${id}`).socketsJoin(
+                `chat:${chat.id}`
+            );
+
+            io.to(`user:${id}`).emit(
+                'chat:new',
+                fullChat
+            );
+        });
+
+        res.status(201).json(fullChat);
     }
+);
 
-    const chat = await Chat.create({
-        type,
-        members: memberIds,
-        title: req.body.title || '',
-        adminIds: [req.userId],
-        keyEnvelopes: req.body.keyEnvelopes || []
-    });
+/* ============================================================
+   CHAT SETTINGS: MUTE + DISAPPEARING MESSAGES
+============================================================ */
 
-    const populatedChat = await chat.populate(
-        'members',
-        'name email avatar lastSeen'
-    );
-
-    memberIds.forEach(id => {
-        io.in(`user:${id}`).socketsJoin(
-            `chat:${chat.id}`
+app.patch(
+    '/api/chats/:id/settings',
+    requireAuth,
+    async (req, res) => {
+        const chat = await permitted(
+            req.params.id,
+            req.userId
         );
 
-        io.to(`user:${id}`).emit(
-            'chat:new',
-            populatedChat
-        );
-    });
+        if (!chat) {
+            return res.sendStatus(404);
+        }
 
-    res.status(201).json(populatedChat);
-});
+        const {
+            mutedUntil,
+            disappearingAfterSeconds
+        } = req.body;
+
+        const allowedDurations = [
+            0,
+            86400,
+            604800
+        ];
+
+        if (
+            disappearingAfterSeconds !== undefined &&
+            !allowedDurations.includes(
+                Number(disappearingAfterSeconds)
+            )
+        ) {
+            return res.status(400).json({
+                error: 'Invalid disappearing-message duration'
+            });
+        }
+
+        if (disappearingAfterSeconds !== undefined) {
+            chat.disappearingAfterSeconds =
+                Number(disappearingAfterSeconds);
+        }
+
+        if (mutedUntil !== undefined) {
+            let setting = chat.memberSettings.find(item =>
+                String(item.user) === String(req.userId)
+            );
+
+            if (!setting) {
+                chat.memberSettings.push({
+                    user: req.userId,
+                    mutedUntil: mutedUntil
+                        ? new Date(mutedUntil)
+                        : null
+                });
+            } else {
+                setting.mutedUntil = mutedUntil
+                    ? new Date(mutedUntil)
+                    : null;
+            }
+        }
+
+        await chat.save();
+
+        res.json(await populatedChat(chat.id));
+    }
+);
+
+/* ============================================================
+   MESSAGES
+============================================================ */
 
 app.get(
     '/api/chats/:id/messages',
@@ -491,9 +662,22 @@ app.get(
 
         const messages = await Message.find({
             chat: chat.id,
-            ...before
+            ...before,
+            $or: [
+                {
+                    expiresAt: null
+                },
+                {
+                    expiresAt: {
+                        $gt: new Date()
+                    }
+                }
+            ]
         })
-            .populate('sender', 'name avatar')
+            .populate(
+                'sender',
+                'name avatar'
+            )
             .sort({
                 _id: -1
             })
@@ -503,10 +687,9 @@ app.get(
     }
 );
 
-
-// ============================================================
-// UPLOADS AND PUSH NOTIFICATIONS
-// ============================================================
+/* ============================================================
+   UPLOADS + PUSH NOTIFICATIONS
+============================================================ */
 
 app.post(
     '/api/upload',
@@ -546,10 +729,9 @@ app.post(
     }
 );
 
-
-// ============================================================
-// SOCKET.IO
-// ============================================================
+/* ============================================================
+   SOCKET.IO
+============================================================ */
 
 io.use(socketAuth);
 
@@ -574,7 +756,9 @@ io.on('connection', async socket => {
     socket.on(
         'typing',
         async ({ chatId, isTyping }) => {
-            if (await permitted(chatId, userId)) {
+            const chat = await permitted(chatId, userId);
+
+            if (chat) {
                 socket.to(`chat:${chatId}`).emit(
                     'typing',
                     {
@@ -589,7 +773,7 @@ io.on('connection', async socket => {
 
     socket.on(
         'message:send',
-        async (data, ack) => {
+        async (data, acknowledge) => {
             try {
                 const chat = await permitted(
                     data.chatId,
@@ -600,13 +784,24 @@ io.on('connection', async socket => {
                     throw Error('Chat unavailable');
                 }
 
+                if (!data.ciphertext || !data.iv) {
+                    throw Error('Encrypted message data is required');
+                }
+
                 const message = await Message.create({
                     chat: chat.id,
                     sender: userId,
                     ciphertext: data.ciphertext,
                     iv: data.iv,
                     kind: data.kind || 'text',
-                    attachment: data.attachment
+                    attachment: data.attachment,
+
+                    expiresAt: chat.disappearingAfterSeconds
+                        ? new Date(
+                            Date.now() +
+                            chat.disappearingAfterSeconds * 1000
+                        )
+                        : null
                 });
 
                 chat.lastMessage = message.id;
@@ -622,12 +817,12 @@ io.on('connection', async socket => {
                     fullMessage
                 );
 
-                ack?.({
+                acknowledge?.({
                     ok: true,
                     message: fullMessage
                 });
             } catch (error) {
-                ack?.({
+                acknowledge?.({
                     ok: false,
                     error: error.message
                 });
@@ -647,8 +842,11 @@ io.on('connection', async socket => {
                 return;
             }
 
-            await Message.findByIdAndUpdate(
-                messageId,
+            await Message.findOneAndUpdate(
+                {
+                    _id: messageId,
+                    chat: chat.id
+                },
                 {
                     $addToSet: {
                         readBy: userId
@@ -685,10 +883,9 @@ io.on('connection', async socket => {
     });
 });
 
-
-// ============================================================
-// START SERVER
-// ============================================================
+/* ============================================================
+   SERVER START
+============================================================ */
 
 const port = Number(process.env.PORT || 5000);
 
