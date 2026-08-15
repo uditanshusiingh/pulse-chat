@@ -91,6 +91,28 @@ const chatSchema = new Schema(
 
                 senderPublicKey: Schema.Types.Mixed
             }
+        ],
+
+        // Chat-wide disappearing-message duration.
+        // 0 = disabled, 86400 = 24 hours, 604800 = 7 days.
+        disappearingAfterSeconds: {
+            type: Number,
+            default: 0
+        },
+
+        // Each user can mute this chat separately.
+        memberSettings: [
+            {
+                user: {
+                    type: Schema.Types.ObjectId,
+                    ref: 'User'
+                },
+
+                mutedUntil: {
+                    type: Date,
+                    default: null
+                }
+            }
         ]
     },
     {
@@ -157,7 +179,16 @@ const messageSchema = new Schema(
                 type: Schema.Types.ObjectId,
                 ref: 'User'
             }
-        ]
+        ],
+
+        // MongoDB automatically deletes this message after expiry.
+        expiresAt: {
+            type: Date,
+            default: null,
+            index: {
+                expireAfterSeconds: 0
+            }
+        }
     },
     {
         timestamps: true
