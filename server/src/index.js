@@ -1,8 +1,5 @@
 import dotenv from 'dotenv';
-
-dotenv.config({
-    path: '../../.env'
-});
+dotenv.config({ path: '../../.env' });
 
 import express from 'express';
 import http from 'http';
@@ -40,23 +37,17 @@ const upload = multer({
     }
 });
 
-app.use(
-    helmet({
-        crossOriginResourcePolicy: false
-    })
-);
+app.use(helmet({
+    crossOriginResourcePolicy: false
+}));
 
-app.use(
-    cors({
-        origin: origins
-    })
-);
+app.use(cors({
+    origin: origins
+}));
 
-app.use(
-    express.json({
-        limit: '1mb'
-    })
-);
+app.use(express.json({
+    limit: '1mb'
+}));
 
 app.use(morgan('tiny'));
 
@@ -69,6 +60,24 @@ app.get('/health', (_, res) => {
     res.json({ ok: true });
 });
 
+function publicUser(user) {
+    return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar,
+        bio: user.bio,
+        lastSeen: user.lastSeen
+    };
+}
+
+async function permitted(id, userId) {
+    return Chat.findOne({
+        _id: id,
+        members: userId
+    });
+}
+
 
 // ============================================================
 // AUTHENTICATION
@@ -76,10 +85,7 @@ app.get('/health', (_, res) => {
 
 app.post(
     '/api/auth/register',
-    rateLimit({
-        windowMs: 60000,
-        max: 10
-    }),
+    rateLimit({ windowMs: 60000, max: 10 }),
     async (req, res) => {
         const { name, email, password } = req.body;
 
@@ -110,10 +116,7 @@ app.post(
 
 app.post(
     '/api/auth/login',
-    rateLimit({
-        windowMs: 60000,
-        max: 10
-    }),
+    rateLimit({ windowMs: 60000, max: 10 }),
     async (req, res) => {
         const user = await User.findOne({
             email: req.body.email?.toLowerCase()
@@ -146,16 +149,11 @@ app.post(
 
 app.post(
     '/api/auth/forgot-password',
-    rateLimit({
-        windowMs: 60000,
-        max: 5
-    }),
+    rateLimit({ windowMs: 60000, max: 5 }),
     async (req, res) => {
         const email = req.body.email?.toLowerCase()?.trim();
-
         const user = await User.findOne({ email });
 
-        // Keep response identical whether the email exists or not.
         if (!user) {
             return res.json({
                 message: 'If an account exists for that email, a reset link has been sent.'
@@ -200,11 +198,7 @@ app.post(
                             html: `
                                 <h2>Reset your password</h2>
                                 <p>This link expires in 15 minutes.</p>
-                                <p>
-                                    <a href="${resetLink}">
-                                        Reset password
-                                    </a>
-                                </p>
+                                <p><a href="${resetLink}">Reset password</a></p>
                             `
                         })
                     }
@@ -236,10 +230,7 @@ app.post(
 
 app.post(
     '/api/auth/reset-password',
-    rateLimit({
-        windowMs: 60000,
-        max: 5
-    }),
+    rateLimit({ windowMs: 60000, max: 5 }),
     async (req, res) => {
         const { token, password } = req.body;
 
@@ -249,13 +240,13 @@ app.post(
             });
         }
 
-        const tokenHash = crypto
+        const hash = crypto
             .createHash('sha256')
             .update(token)
             .digest('hex');
 
         const user = await User.findOne({
-            resetTokenHash: tokenHash,
+            resetTokenHash: hash,
             resetTokenExpiresAt: {
                 $gt: new Date()
             }
@@ -281,189 +272,201 @@ app.post(
 
 
 // ============================================================
-// PROFILE
+// PROFILE AND ENCRYPTION KEYS
 // ============================================================
 
-app.get(
-    '/api/me',
+app.get('/api/me', requireAuth, async (req, res) => {
+    const user = await User.findById(req.userId);
+    res.json(publicUser(user));
+});
+
+app.patch('/api/me', requireAuth, async (req, res) => {
+    const user = await User.findByIdAndUpdate(
+        req.userId,
+        {
+            $set: {
+                name: req.body.name,
+                bio: req.body.bio,
+                avatar: req.body.avatar
+            }
+        },
+        {
+            new: true,
+            runValidators: true
+        }
+    );
+
+    res.json(publicUser(user));
+});
+
+app.put(
+    '/api/me/encryption-key',
     requireAuth,
     async (req, res) => {
-        const user = await User.findById(req.userId);
+        if (!req.body.publicKey) {
+            return res.status(400).json({
+                error: 'Public encryption key is required'
+            });
+        }
 
-        res.json(publicUser(user));
-    }
-);
-
-app.patch(
-    '/api/me',
-    requireAuth,
-    async (req, res) => {
-        const user = await User.findByIdAndUpdate(
+        await User.findByIdAndUpdate(
             req.userId,
             {
-                $set: {
-                    name: req.body.name,
-                    bio: req.body.bio,
-                    avatar: req.body.avatar
-                }
-            },
-            {
-                new: true,
-                runValidators: true
+                encryptionPublicKey: req.body.publicKey
             }
         );
 
-        res.json(publicUser(user));
+        res.sendStatus(204);
     }
 );
 
 app.get(
-    '/api/users',
+    '/api/users/:id/encryption-key',
     requireAuth,
     async (req, res) => {
-        const q = (
-            req.query.q || ''
-        ).replace(
-            /[.*+?^${}()|[\]\\]/g,
-            '\\$&'
-        );
+        const user = await User.findById(
+            req.params.id
+        ).select('encryptionPublicKey');
 
-        const users = await User.find({
-            _id: {
-                $ne: req.userId
-            },
-            $or: [
-                {
-                    name: {
-                        $regex: q,
-                        $options: 'i'
-                    }
-                },
-                {
-                    email: {
-                        $regex: q,
-                        $options: 'i'
-                    }
-                }
-            ]
-        }).limit(20);
+        if (!user?.encryptionPublicKey) {
+            return res.status(404).json({
+                error: 'Encryption key unavailable'
+            });
+        }
 
-        res.json(users.map(publicUser));
+        res.json({
+            publicKey: user.encryptionPublicKey
+        });
     }
 );
+
+app.get('/api/users', requireAuth, async (req, res) => {
+    const q = (req.query.q || '').replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&'
+    );
+
+    const users = await User.find({
+        _id: {
+            $ne: req.userId
+        },
+        $or: [
+            {
+                name: {
+                    $regex: q,
+                    $options: 'i'
+                }
+            },
+            {
+                email: {
+                    $regex: q,
+                    $options: 'i'
+                }
+            }
+        ]
+    }).limit(20);
+
+    res.json(users.map(publicUser));
+});
 
 
 // ============================================================
 // CHATS
 // ============================================================
 
-app.get(
-    '/api/chats',
-    requireAuth,
-    async (req, res) => {
-        const chats = await Chat.find({
-            members: req.userId
+app.get('/api/chats', requireAuth, async (req, res) => {
+    const chats = await Chat.find({
+        members: req.userId
+    })
+        .populate('members', 'name email avatar lastSeen')
+        .populate({
+            path: 'lastMessage',
+            populate: {
+                path: 'sender',
+                select: 'name'
+            }
         })
-            .populate(
-                'members',
-                'name email avatar lastSeen'
-            )
+        .sort({
+            updatedAt: -1
+        });
+
+    res.json(chats);
+});
+
+app.post('/api/chats', requireAuth, async (req, res) => {
+    const memberIds = [
+        ...new Set([
+            req.userId,
+            ...(req.body.memberIds || [])
+        ])
+    ];
+
+    if (memberIds.length < 2) {
+        return res.status(400).json({
+            error: 'Choose at least one other member'
+        });
+    }
+
+    const type =
+        req.body.type === 'group'
+            ? 'group'
+            : 'direct';
+
+    if (type === 'direct') {
+        const existingChat = await Chat.findOne({
+            type: 'direct',
+            members: {
+                $all: memberIds
+            },
+            $expr: {
+                $eq: [
+                    {
+                        $size: '$members'
+                    },
+                    2
+                ]
+            }
+        })
+            .populate('members', 'name email avatar lastSeen')
             .populate({
                 path: 'lastMessage',
                 populate: {
                     path: 'sender',
                     select: 'name'
                 }
-            })
-            .sort({
-                updatedAt: -1
             });
 
-        res.json(chats);
+        if (existingChat) {
+            return res.json(existingChat);
+        }
     }
-);
 
-app.post(
-    '/api/chats',
-    requireAuth,
-    async (req, res) => {
-        const memberIds = [
-            ...new Set([
-                req.userId,
-                ...(req.body.memberIds || [])
-            ])
-        ];
+    const chat = await Chat.create({
+        type,
+        members: memberIds,
+        title: req.body.title || '',
+        adminIds: [req.userId],
+        keyEnvelopes: req.body.keyEnvelopes || []
+    });
 
-        if (memberIds.length < 2) {
-            return res.status(400).json({
-                error: 'Choose at least one other member'
-            });
-        }
+    const populatedChat = await chat.populate(
+        'members',
+        'name email avatar lastSeen'
+    );
 
-        const type =
-            req.body.type === 'group'
-                ? 'group'
-                : 'direct';
-
-        if (type === 'direct') {
-            const existingChat = await Chat.findOne({
-                type: 'direct',
-                members: {
-                    $all: memberIds
-                },
-                $expr: {
-                    $eq: [
-                        {
-                            $size: '$members'
-                        },
-                        2
-                    ]
-                }
-            })
-                .populate(
-                    'members',
-                    'name email avatar lastSeen'
-                )
-                .populate({
-                    path: 'lastMessage',
-                    populate: {
-                        path: 'sender',
-                        select: 'name'
-                    }
-                });
-
-            if (existingChat) {
-                return res.json(existingChat);
-            }
-        }
-
-        const chat = await Chat.create({
-            type,
-            members: memberIds,
-            title: req.body.title || '',
-            adminIds: [req.userId]
-        });
-
-        const populatedChat = await chat.populate(
-            'members',
-            'name email avatar lastSeen'
+    memberIds.forEach(id => {
+        io.in(`user:${id}`).socketsJoin(
+            `chat:${chat.id}`
         );
 
-        memberIds.forEach(id => {
-            io.to(`user:${id}`).emit(
-                'chat:new',
-                populatedChat
-            );
-        });
+        io.to(`user:${id}`).emit(
+            'chat:new',
+            populatedChat
+        );
+    });
 
-        res.status(201).json(populatedChat);
-    }
-);
-
-
-// ============================================================
-// MESSAGES
-// ============================================================
+    res.status(201).json(populatedChat);
+});
 
 app.get(
     '/api/chats/:id/messages',
@@ -490,10 +493,7 @@ app.get(
             chat: chat.id,
             ...before
         })
-            .populate(
-                'sender',
-                'name avatar'
-            )
+            .populate('sender', 'name avatar')
             .sort({
                 _id: -1
             })
@@ -505,7 +505,7 @@ app.get(
 
 
 // ============================================================
-// UPLOADS AND PUSH
+// UPLOADS AND PUSH NOTIFICATIONS
 // ============================================================
 
 app.post(
@@ -548,173 +548,142 @@ app.post(
 
 
 // ============================================================
-// HELPERS
-// ============================================================
-
-async function permitted(id, userId) {
-    return Chat.findOne({
-        _id: id,
-        members: userId
-    });
-}
-
-function publicUser(user) {
-    return {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        avatar: user.avatar,
-        bio: user.bio,
-        lastSeen: user.lastSeen
-    };
-}
-
-
-// ============================================================
 // SOCKET.IO
 // ============================================================
 
 io.use(socketAuth);
 
-io.on(
-    'connection',
-    async socket => {
-        const userId = socket.userId;
+io.on('connection', async socket => {
+    const userId = socket.userId;
 
-        socket.join(`user:${userId}`);
+    socket.join(`user:${userId}`);
 
-        const chats = await Chat.find({
-            members: userId
-        }).select('_id');
+    const chats = await Chat.find({
+        members: userId
+    }).select('_id');
 
-        chats.forEach(chat => {
-            socket.join(`chat:${chat.id}`);
-        });
+    chats.forEach(chat => {
+        socket.join(`chat:${chat.id}`);
+    });
 
-        io.emit('presence', {
-            userId,
-            online: true
-        });
+    io.emit('presence', {
+        userId,
+        online: true
+    });
 
-        socket.on(
-            'typing',
-            async ({ chatId, isTyping }) => {
-                if (await permitted(chatId, userId)) {
-                    socket
-                        .to(`chat:${chatId}`)
-                        .emit(
-                            'typing',
-                            {
-                                chatId,
-                                userId,
-                                isTyping
-                            }
-                        );
-                }
-            }
-        );
-
-        socket.on(
-            'message:send',
-            async (data, ack) => {
-                try {
-                    const chat = await permitted(
-                        data.chatId,
-                        userId
-                    );
-
-                    if (!chat) {
-                        throw Error('Chat unavailable');
+    socket.on(
+        'typing',
+        async ({ chatId, isTyping }) => {
+            if (await permitted(chatId, userId)) {
+                socket.to(`chat:${chatId}`).emit(
+                    'typing',
+                    {
+                        chatId,
+                        userId,
+                        isTyping
                     }
-
-                    const message = await Message.create({
-                        chat: chat.id,
-                        sender: userId,
-                        ciphertext: data.ciphertext,
-                        iv: data.iv,
-                        kind: data.kind || 'text',
-                        attachment: data.attachment
-                    });
-
-                    chat.lastMessage = message.id;
-                    await chat.save();
-
-                    const fullMessage = await message.populate(
-                        'sender',
-                        'name avatar'
-                    );
-
-                    io.to(`chat:${chat.id}`).emit(
-                        'message:new',
-                        fullMessage
-                    );
-
-                    ack?.({
-                        ok: true,
-                        message: fullMessage
-                    });
-                } catch (error) {
-                    ack?.({
-                        ok: false,
-                        error: error.message
-                    });
-                }
+                );
             }
-        );
+        }
+    );
 
-        socket.on(
-            'message:read',
-            async ({ chatId, messageId }) => {
+    socket.on(
+        'message:send',
+        async (data, ack) => {
+            try {
                 const chat = await permitted(
-                    chatId,
+                    data.chatId,
                     userId
                 );
 
                 if (!chat) {
-                    return;
+                    throw Error('Chat unavailable');
                 }
 
-                await Message.findByIdAndUpdate(
-                    messageId,
-                    {
-                        $addToSet: {
-                            readBy: userId
-                        },
-                        $set: {
-                            status: 'read'
-                        }
-                    }
+                const message = await Message.create({
+                    chat: chat.id,
+                    sender: userId,
+                    ciphertext: data.ciphertext,
+                    iv: data.iv,
+                    kind: data.kind || 'text',
+                    attachment: data.attachment
+                });
+
+                chat.lastMessage = message.id;
+                await chat.save();
+
+                const fullMessage = await message.populate(
+                    'sender',
+                    'name avatar'
                 );
 
-                io.to(`chat:${chatId}`).emit(
-                    'message:read',
-                    {
-                        chatId,
-                        messageId,
-                        userId
-                    }
-                );
-            }
-        );
-
-        socket.on(
-            'disconnect',
-            async () => {
-                await User.findByIdAndUpdate(
-                    userId,
-                    {
-                        lastSeen: new Date()
-                    }
+                io.to(`chat:${chat.id}`).emit(
+                    'message:new',
+                    fullMessage
                 );
 
-                io.emit('presence', {
-                    userId,
-                    online: false
+                ack?.({
+                    ok: true,
+                    message: fullMessage
+                });
+            } catch (error) {
+                ack?.({
+                    ok: false,
+                    error: error.message
                 });
             }
+        }
+    );
+
+    socket.on(
+        'message:read',
+        async ({ chatId, messageId }) => {
+            const chat = await permitted(
+                chatId,
+                userId
+            );
+
+            if (!chat) {
+                return;
+            }
+
+            await Message.findByIdAndUpdate(
+                messageId,
+                {
+                    $addToSet: {
+                        readBy: userId
+                    },
+                    $set: {
+                        status: 'read'
+                    }
+                }
+            );
+
+            io.to(`chat:${chatId}`).emit(
+                'message:read',
+                {
+                    chatId,
+                    messageId,
+                    userId
+                }
+            );
+        }
+    );
+
+    socket.on('disconnect', async () => {
+        await User.findByIdAndUpdate(
+            userId,
+            {
+                lastSeen: new Date()
+            }
         );
-    }
-);
+
+        io.emit('presence', {
+            userId,
+            online: false
+        });
+    });
+});
 
 
 // ============================================================
