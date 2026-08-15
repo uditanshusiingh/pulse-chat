@@ -473,3 +473,145 @@ input {
         opacity: 0.8;
     }
 }
+
+.chathead {
+    position: relative;
+}
+
+.chat-menu {
+    position: absolute;
+    z-index: 20;
+    top: 62px;
+    right: 16px;
+    min-width: 235px;
+    padding: 7px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--paper);
+    box-shadow: 0 14px 36px #0000002b;
+}
+
+.chat-menu button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 11px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--ink);
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.chat-menu button:hover {
+    background: var(--soft);
+}
+
+.chat-menu button:disabled {
+    color: var(--muted);
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.chat-menu small {
+    margin-left: auto;
+    color: var(--muted);
+}
+
+.chat-panel {
+    width: min(500px, 92vw);
+    max-height: 78vh;
+    overflow: auto;
+}
+
+.panel-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.panel-title h2 {
+    margin: 0;
+}
+
+.panel-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.panel-row button {
+    margin-left: auto;
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 11px;
+    background: var(--soft);
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+}
+
+.panel-search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--soft);
+    margin-bottom: 12px;
+}
+
+.panel-message,
+.shared-file {
+    padding: 11px;
+    margin: 8px 0;
+    border-radius: 9px;
+    background: var(--soft);
+    color: var(--ink);
+}
+
+.shared-file a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.theme-options {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.theme-dot {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 3px solid transparent;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.theme-dot.selected {
+    border-color: var(--ink);
+}
+
+.chat-themed .bubble.mine {
+    background: var(--chat-bubble-color, var(--mine));
+}
+
+.more-danger {
+    color: #d84242 !important;
+}
+
+.recording {
+    background: #d84242 !important;
+    color: #ffffff !important;
+    animation: pulse-recording 1s infinite;
+}
